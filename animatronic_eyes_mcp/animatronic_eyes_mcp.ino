@@ -264,7 +264,7 @@ void loop() {
     } else if (blinkPhase == OPENING && (currentMillis - blinkStartTime >= blinkOpenDuration)) {
       blinking = false;
       blinkPhase = NONE;
-      // nextBlinkTime = currentMillis + random(3000, 8000);  // Schedule next blink (COMMENTED OUT TO DISABLE AUTO-BLINK)
+      nextBlinkTime = currentMillis + random(3000, 8000);  // Schedule next blink
     }
   }
   
