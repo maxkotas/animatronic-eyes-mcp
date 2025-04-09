@@ -105,6 +105,7 @@ const unsigned long blinkOpenDuration  = 100; // Duration (ms) after opening bef
 
 // --- MCP Control Variables ---
 bool randomMovementEnabled = false; // Disable random movement by default
+bool autoBlinkingEnabled = true;    // Enable automatic blinking by default
 String inputBuffer = "";            // Buffer for incoming serial data
 bool stringComplete = false;        // Flag for complete command received
 
@@ -180,6 +181,14 @@ void processCommand(String command) {
     Serial.print("Random movement ");
     Serial.println(randomMovementEnabled ? "enabled" : "disabled");
   }
+  else if (command.startsWith("AUTOBLINK ")) {
+    // Extract enable value (0/1)
+    String enableStr = command.substring(10);
+    autoBlinkingEnabled = (enableStr == "1" || enableStr.equalsIgnoreCase("true"));
+
+    Serial.print("Automatic blinking ");
+    Serial.println(autoBlinkingEnabled ? "enabled" : "disabled");
+  }
   else {
     Serial.print("Unknown command: ");
     Serial.println(command);
@@ -248,7 +257,7 @@ void loop() {
   }
   
   // --- Handle Blinking ---
-  if (!blinking && currentMillis >= nextBlinkTime) {
+  if (autoBlinkingEnabled && !blinking && currentMillis >= nextBlinkTime) { // Only check if auto-blinking is enabled
     blinking = true;
     blinkPhase = CLOSING;
     blinkStartTime = currentMillis;
@@ -264,7 +273,9 @@ void loop() {
     } else if (blinkPhase == OPENING && (currentMillis - blinkStartTime >= blinkOpenDuration)) {
       blinking = false;
       blinkPhase = NONE;
-      nextBlinkTime = currentMillis + random(3000, 8000);  // Schedule next blink
+      if (autoBlinkingEnabled) { // Only schedule next blink if auto-blinking is enabled
+        nextBlinkTime = currentMillis + random(3000, 8000);  // Schedule next blink
+      }
     }
   }
   

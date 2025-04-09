@@ -309,6 +309,30 @@ server.tool(
   }
 );
 
+// 6. Set Auto Blink (enable/disable)
+server.tool(
+  'setAutoBlink',
+  {
+    enable: z.boolean().describe('Enable or disable automatic blinking'),
+  },
+  async ({ enable }) => {
+    const command = `AUTOBLINK ${enable ? '1' : '0'}`;
+    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: errorResult === null
+            ? `Automatic blinking ${enable ? 'enabled' : 'disabled'}`
+            : `Failed to send command: ${errorResult}`, // Use specific error
+        },
+      ],
+      isError: errorResult !== null // Indicate error in the result if sendCommand failed
+    };
+  }
+);
+
 // Main function
 async function main() {
   console.log('Starting Animatronic Eyes MCP Server...');
