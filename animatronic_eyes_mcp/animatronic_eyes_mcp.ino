@@ -1,8 +1,15 @@
-// Modified Arduino code for animatronic eyes with MCP server control
-// This code extends the original random movement code with serial command support
-
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
+#include <WiFi.h>
+#include <WebServer.h> // Using the standard WebServer library
+#include "esp_wifi.h" // Include for esp_wifi_set_protocol()
+
+// --- WiFi Credentials ---
+const char* ssid = "KotasNetIoT";
+const char* password = "8133rosemont";
+
+// --- Web Server Setup ---
+WebServer server(80); // Create a web server object on port 80
 
 // --- PCA9685 Servo Driver Setup ---
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
@@ -50,12 +57,12 @@ void calibrate() {
 void setEyesOpen(int ud_angle) {
   writeServo(SERVO_UD_CH, ud_angle);
   float ud_progress = (float)(ud_angle - limitsUD.minAngle) / (limitsUD.maxAngle - limitsUD.minAngle);
-  
+
   int tl_target = limitsTL.maxAngle - ((limitsTL.maxAngle - limitsTL.minAngle) * (0.8 * (1 - ud_progress)));
   int tr_target = limitsTR.maxAngle + ((limitsTR.minAngle - limitsTR.maxAngle) * (0.8 * (1 - ud_progress)));
   int bl_target = limitsBL.maxAngle + ((limitsBL.minAngle - limitsBL.maxAngle) * (0.4 * ud_progress));
   int br_target = limitsBR.maxAngle - ((limitsBR.maxAngle - limitsBR.minAngle) * (0.4 * ud_progress));
-  
+
   writeServo(SERVO_TL_CH, tl_target);
   writeServo(SERVO_TR_CH, tr_target);
   writeServo(SERVO_BL_CH, bl_target);
@@ -70,7 +77,7 @@ void setEyelidsOpenness(int percentage) {
   int tr_angle = map(percentage, 0, 100, limitsTR.minAngle, limitsTR.maxAngle);
   int bl_angle = map(percentage, 0, 100, limitsBL.minAngle, limitsBL.maxAngle);
   int br_angle = map(percentage, 0, 100, limitsBR.minAngle, limitsBR.maxAngle);
-  
+
   writeServo(SERVO_TL_CH, tl_angle);
   writeServo(SERVO_TR_CH, tr_angle);
   writeServo(SERVO_BL_CH, bl_angle);
@@ -103,11 +110,9 @@ unsigned long blinkStartTime = 0;
 const unsigned long blinkCloseDuration = 100; // Duration (ms) to keep eyes closed
 const unsigned long blinkOpenDuration  = 100; // Duration (ms) after opening before resuming
 
-// --- MCP Control Variables ---
+// --- Control Variables ---
 bool randomMovementEnabled = false; // Disable random movement by default
 bool autoBlinkingEnabled = true;    // Enable automatic blinking by default
-String inputBuffer = "";            // Buffer for incoming serial data
-bool stringComplete = false;        // Flag for complete command received
 
 // --- Incremental Angle Update ---
 // Moves the current angle toward the target by a defined step size.
@@ -122,96 +127,127 @@ int updateAngle(int current, int target) {
     return current - step;
 }
 
-// --- Process MCP Commands ---
-void processCommand(String command) {
-  // Trim any whitespace
-  command.trim();
-  
-  // Log received command
-  Serial.print("Received command: ");
-  Serial.println(command);
-  
-  if (command.startsWith("MOVE ")) {
-    // Extract horizontal and vertical values
-    int spaceIndex = command.indexOf(' ', 5);
-    if (spaceIndex > 5) {
-      int horizontal = command.substring(5, spaceIndex).toInt();
-      int vertical = command.substring(spaceIndex + 1).toInt();
-      
-      // Constrain values to valid ranges
-      horizontal = constrain(horizontal, limitsLR.minAngle, limitsLR.maxAngle);
-      vertical = constrain(vertical, limitsUD.minAngle, limitsUD.maxAngle);
-      
-      // Set target positions
-      targetLR = horizontal;
-      targetUD = vertical;
-      
-      Serial.print("Moving eyes to: H=");
-      Serial.print(horizontal);
-      Serial.print(", V=");
-      Serial.println(vertical);
-    }
-  }
-  else if (command.startsWith("EYELIDS ")) {
-    // Extract openness value (0-100%)
-    int openness = command.substring(8).toInt();
-    openness = constrain(openness, 0, 100);
-    
-    // Directly set eyelid positions based on percentage
-    setEyelidsOpenness(openness);
-    
-    Serial.print("Setting eyelids to ");
-    Serial.print(openness);
-    Serial.println("% open");
-  }
-  else if (command == "BLINK") {
-    // Trigger blink
-    blinking = true;
-    blinkPhase = CLOSING;
-    blinkStartTime = millis();
-    closeEyes();
-    
-    Serial.println("Blinking eyes");
-  }
-  else if (command.startsWith("RANDOM ")) {
-    // Extract enable value (0/1)
-    String enableStr = command.substring(7);
-    randomMovementEnabled = (enableStr == "1" || enableStr.equalsIgnoreCase("true"));
-    
-    Serial.print("Random movement ");
-    Serial.println(randomMovementEnabled ? "enabled" : "disabled");
-  }
-  else if (command.startsWith("AUTOBLINK ")) {
-    // Extract enable value (0/1)
-    String enableStr = command.substring(10);
-    autoBlinkingEnabled = (enableStr == "1" || enableStr.equalsIgnoreCase("true"));
+// --- HTTP Handlers ---
 
-    Serial.print("Automatic blinking ");
-    Serial.println(autoBlinkingEnabled ? "enabled" : "disabled");
+// Handle root request
+void handleRoot() {
+  String html = "<html><body><h1>Animatronic Eyes Control</h1>";
+  html += "<p>Use endpoints like:</p>";
+  html += "<ul>";
+  html += "<li>/move?h=90&v=90</li>";
+  html += "<li>/eyelids?openness=50</li>";
+  html += "<li>/blink</li>";
+  html += "<li>/random?enable=1 (or 0)</li>";
+  html += "<li>/autoblink?enable=1 (or 0)</li>";
+  html += "</ul>";
+  html += "<p>Current Status:<br>";
+  html += "LR Target: " + String(targetLR) + "<br>";
+  html += "UD Target: " + String(targetUD) + "<br>";
+  html += "Random Movement: " + String(randomMovementEnabled ? "Enabled" : "Disabled") + "<br>";
+  html += "Auto Blinking: " + String(autoBlinkingEnabled ? "Enabled" : "Disabled") + "<br>";
+  html += "</p></body></html>";
+  server.send(200, "text/html", html);
+}
+
+// Handle /move requests
+void handleMove() {
+  int horizontal = targetLR; // Default to current target if param missing
+  int vertical = targetUD;   // Default to current target if param missing
+
+  if (server.hasArg("h")) {
+    horizontal = server.arg("h").toInt();
+    horizontal = constrain(horizontal, limitsLR.minAngle, limitsLR.maxAngle);
+    targetLR = horizontal;
   }
-  else {
-    Serial.print("Unknown command: ");
-    Serial.println(command);
+  if (server.hasArg("v")) {
+    vertical = server.arg("v").toInt();
+    vertical = constrain(vertical, limitsUD.minAngle, limitsUD.maxAngle);
+    targetUD = vertical;
+  }
+
+  Serial.print("HTTP Move: H=");
+  Serial.print(targetLR);
+  Serial.print(", V=");
+  Serial.println(targetUD);
+  server.send(200, "text/plain", "OK - Moving eyes to H=" + String(targetLR) + ", V=" + String(targetUD));
+}
+
+// Handle /eyelids requests
+void handleEyelids() {
+  if (server.hasArg("openness")) {
+    int openness = server.arg("openness").toInt();
+    openness = constrain(openness, 0, 100);
+    setEyelidsOpenness(openness);
+
+    Serial.print("HTTP Eyelids: Openness=");
+    Serial.println(openness);
+    server.send(200, "text/plain", "OK - Setting eyelids to " + String(openness) + "%");
+  } else {
+    server.send(400, "text/plain", "Bad Request: Missing 'openness' parameter");
   }
 }
 
+// Handle /blink requests
+void handleBlink() {
+  blinking = true;
+  blinkPhase = CLOSING;
+  blinkStartTime = millis();
+  closeEyes();
+
+  Serial.println("HTTP Blink");
+  server.send(200, "text/plain", "OK - Triggering blink");
+}
+
+// Handle /random requests
+void handleRandom() {
+  if (server.hasArg("enable")) {
+    String enableStr = server.arg("enable");
+    randomMovementEnabled = (enableStr == "1" || enableStr.equalsIgnoreCase("true"));
+
+    Serial.print("HTTP Random Movement: ");
+    Serial.println(randomMovementEnabled ? "Enabled" : "Disabled");
+    server.send(200, "text/plain", "OK - Random movement " + String(randomMovementEnabled ? "enabled" : "disabled"));
+  } else {
+    server.send(400, "text/plain", "Bad Request: Missing 'enable' parameter");
+  }
+}
+
+// Handle /autoblink requests
+void handleAutoBlink() {
+  if (server.hasArg("enable")) {
+    String enableStr = server.arg("enable");
+    autoBlinkingEnabled = (enableStr == "1" || enableStr.equalsIgnoreCase("true"));
+
+    Serial.print("HTTP Auto Blinking: ");
+    Serial.println(autoBlinkingEnabled ? "Enabled" : "Disabled");
+    server.send(200, "text/plain", "OK - Auto blinking " + String(autoBlinkingEnabled ? "enabled" : "disabled"));
+  } else {
+    server.send(400, "text/plain", "Bad Request: Missing 'enable' parameter");
+  }
+}
+
+// Handle Not Found requests
+void handleNotFound() {
+  server.send(404, "text/plain", "Not Found");
+}
+
+// --- Setup Function ---
 void setup() {
-  // Initialize serial communication
+  // Initialize serial communication for debugging
   Serial.begin(115200);
-  // Removed while(!Serial);
-  Serial.println("Serial Initialized.");
-  inputBuffer.reserve(50);  // Reserve space for incoming commands
-  
+  Serial.println("\n\nSerial Initialized for Debugging.");
+
   // Initialize PCA9685
   Serial.println("Initializing PCA9685...");
   pwm.begin();
   Serial.println("PCA9685 Initialized.");
   pwm.setPWMFreq(50);  // 50 Hz update rate for servos
   Serial.println("PWM Frequency Set.");
+
   Serial.println("Seeding Random Generator...");
-  randomSeed(analogRead(0)); // Seed random number generator
+  randomSeed(analogRead(A0)); // Use an analog pin for better randomness if available
   Serial.println("Random Seed Set.");
-  
+
   Serial.println("Calibrating Servos...");
   calibrate();
   Serial.println("Servos Calibrated.");
@@ -220,42 +256,67 @@ void setup() {
   currentUD = 90;
   targetLR = 90;
   targetUD = 90;
-  
+
   // Schedule the first eye movement and blink events
   nextTargetTime = millis() + random(1000, 3000);  // New target every 1-3 seconds
-  nextBlinkTime  = millis() + random(3000, 8000);  // Blink every 3-8 seconds
-  
-  // Add a delay before sending Ready message to allow host to connect
-  Serial.println("Waiting before sending Ready...");
-  delay(1000); // Wait 1 second
-  
-  // Send ready message
-  Serial.println("Animatronic Eyes Ready");
+  nextBlinkTime  = millis() + random(3000, 8000);   // Blink every 3-8 seconds
+
+  // --- Connect to WiFi ---
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+
+  // Set WiFi mode to station
+  WiFi.mode(WIFI_STA);
+
+  // Set supported WiFi protocols (802.11b/g/n)
+  esp_err_t protocol_err = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+  if (protocol_err == ESP_OK) {
+    Serial.println("✅ WiFi protocol set to 11b/g/n.");
+  } else {
+    Serial.print("❌ Failed to set WiFi protocol. Error code: ");
+    Serial.println(protocol_err);
+  }
+
+  WiFi.begin(ssid, password);
+  int wifi_retries = 0;
+  while (WiFi.status() != WL_CONNECTED && wifi_retries < 30) { // Retry for ~15 seconds
+    delay(500);
+    Serial.print(".");
+    wifi_retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // --- Setup HTTP Server Routes ---
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/move", HTTP_GET, handleMove);
+    server.on("/eyelids", HTTP_GET, handleEyelids);
+    server.on("/blink", HTTP_GET, handleBlink);
+    server.on("/random", HTTP_GET, handleRandom);
+    server.on("/autoblink", HTTP_GET, handleAutoBlink);
+    server.onNotFound(handleNotFound);
+
+    // Start the server
+    server.begin();
+    Serial.println("HTTP server started");
+  } else {
+    Serial.println("\nFailed to connect to WiFi. Check credentials.");
+    // Optionally, enter a deep sleep or halt state here
+  }
 }
 
+// --- Loop Function ---
 void loop() {
   unsigned long currentMillis = millis();
-  
-  // --- Check for Serial Commands ---
-  while (Serial.available()) {
-    char inChar = (char)Serial.read();
-    
-    // Add character to buffer if not end of line
-    if (inChar != '\n') {
-      inputBuffer += inChar;
-    } else {
-      // End of line reached, process command
-      stringComplete = true;
-    }
+
+  // Handle HTTP client requests if connected to WiFi
+  if (WiFi.status() == WL_CONNECTED) {
+    server.handleClient();
   }
-  
-  // Process complete command
-  if (stringComplete) {
-    processCommand(inputBuffer);
-    inputBuffer = "";
-    stringComplete = false;
-  }
-  
+
   // --- Handle Blinking ---
   if (autoBlinkingEnabled && !blinking && currentMillis >= nextBlinkTime) { // Only check if auto-blinking is enabled
     blinking = true;
@@ -263,7 +324,7 @@ void loop() {
     blinkStartTime = currentMillis;
     closeEyes();  // Begin blink by closing eyelids
   }
-  
+
   if (blinking) {
     if (blinkPhase == CLOSING && (currentMillis - blinkStartTime >= blinkCloseDuration)) {
       blinkPhase = OPENING;
@@ -278,7 +339,7 @@ void loop() {
       }
     }
   }
-  
+
   // --- Update Eye Movement if Not Blinking ---
   if (!blinking) {
     // Choose a new random target position periodically if random movement is enabled
@@ -287,15 +348,15 @@ void loop() {
       targetUD = random(limitsUD.minAngle, limitsUD.maxAngle + 1);
       nextTargetTime = currentMillis + random(1000, 3000);  // Next target in 1-3 sec
     }
-    
+
     // Smoothly adjust current positions toward targets using a faster step
     currentLR = updateAngle(currentLR, targetLR);
     currentUD = updateAngle(currentUD, targetUD);
-    
+
     // Update the eye position and ensure the eyelids remain open
     writeServo(SERVO_LR_CH, currentLR);
     setEyesOpen(currentUD);
   }
-  
+
   delay(20);  // Small delay for smooth updates (~50 Hz refresh rate)
 }

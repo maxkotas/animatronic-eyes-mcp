@@ -1,20 +1,16 @@
 // MCP Server for Animatronic Eyes Control
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-// Removed: import { ExpressServerTransport } from '@modelcontextprotocol/sdk/server/express.js'; // Module not found
 import { z } from 'zod';
-import { SerialPort } from 'serialport';
-import { ReadlineParser } from '@serialport/parser-readline';
-// Removed: import express from 'express'; // Only needed for HTTP transport
-// Removed: import cors from 'cors'; // Only needed for HTTP transport
+import fetch from 'node-fetch'; // Import node-fetch
 
-// Configuration - adjust these values as needed
-const SERIAL_PORT = process.env.SERIAL_PORT || '/dev/tty.usbserial-0001'; // Try the 'cu' device
-const BAUD_RATE = 115200;
-// Removed: const HTTP_PORT = process.env.PORT || 3000; // Only needed for HTTP transport
+// Configuration
+const ESP32_IP = '192.168.50.195'; // IP address of the ESP32 running the web server
+const ESP32_PORT = 80; // Port the ESP32 web server is listening on
+const ESP32_BASE_URL = `http://${ESP32_IP}:${ESP32_PORT}`;
 
 // Enhanced debugging
-console.log(`Starting with serial port: ${SERIAL_PORT} at ${BAUD_RATE} baud`);
+console.log(`Configured to send commands to ESP32 at: ${ESP32_BASE_URL}`);
 
 // Create MCP server
 const server = new McpServer({
@@ -23,156 +19,34 @@ const server = new McpServer({
   description: 'A service that controls animatronic eyes via Arduino',
 });
 
-// Serial port setup
-let port;
-let parser;
-let connected = false;
+// Helper function to send HTTP GET requests to the ESP32
+// Returns null on success, or an error string on failure.
+async function sendHttpRequest(path, params = {}) {
+  const url = new URL(path, ESP32_BASE_URL);
+  Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
 
-async function setupSerialConnection() {
+  console.log(`Sending HTTP request to ESP32: ${url.toString()}`);
+
   try {
-    console.log(`Attempting to connect to serial port: ${SERIAL_PORT}...`);
-    port = new SerialPort({
-      path: SERIAL_PORT,
-      baudRate: BAUD_RATE,
-      autoOpen: false,
-    });
-    
-    // Attach parser immediately
-    parser = port.pipe(new ReadlineParser({ delimiter: '\n' }));
-    
-    // Set up error and close handlers
-    port.on('error', (err) => {
-      console.error('*** Serial port error event received: ***', err.message); // Added logging
-      console.log('*** Setting connected = false due to port error event. ***'); // Added logging
-      connected = false;
-    });
-    
-    port.on('close', (err) => { // Add err parameter if provided
-      console.log('*** Serial port close event received. ***');
-      if (err) {
-        console.error('*** Close event error: ***', err.message);
-      } else {
-        console.log('*** Close event occurred without an explicit error. ***');
-      }
-      console.log('*** Setting connected = false due to port close event. ***');
-      connected = false;
-    });
-    
-    return new Promise((resolve) => {
-      port.open(async (openErr) => {
-        if (openErr) {
-          console.error(`Failed to open serial port ${SERIAL_PORT}:`, openErr.message);
-          return resolve(false);
-        }
-        console.log(`Serial port ${SERIAL_PORT} opened successfully.`);
-  
-        // --- Attempt programmatic reset via DTR toggle ---
-        console.log('Attempting programmatic reset via DTR toggle...');
-        await new Promise(resolve => port.set({ dtr: false }, resolve)); // Set DTR low
-        await new Promise(res => setTimeout(res, 100)); // Wait 100ms
-        await new Promise(resolve => port.set({ dtr: true }, resolve)); // Set DTR high (reset trigger)
-        console.log('DTR toggled. Waiting for Arduino to boot...');
-        await new Promise(res => setTimeout(res, 1500)); // Wait 1.5 seconds for boot after reset
-        console.log('Proceeding to listen for "Ready" message...');
-        // --- End programmatic reset ---
-  
-        let readyReceived = false;
-  
-        const readyPromise = new Promise((resolveReady, rejectReady) => {
-          const readyTimeout = setTimeout(() => {
-            if (!readyReceived) {
-              console.warn('Warning: Timed out waiting for "Ready" message from Arduino.');
-              rejectReady(new Error('Arduino ready timeout post-open'));
-            }
-          }, 10000); // 10 seconds timeout
-  
-          // Attach the listener on the already created parser
-          parser.on('data', function onData(data) {
-            console.log(`[Arduino]: ${data}`);
-            if (data.trim() === 'Animatronic Eyes Ready') {
-              console.log('Received "Ready" message from Arduino.');
-              readyReceived = true;
-              clearTimeout(readyTimeout);
-              // Optionally remove the listener if you no longer need it
-              parser.off('data', onData);
-              resolveReady();
-            }
-          });
-  
-          parser.on('error', (parserErr) => {
-            console.error('ReadlineParser error:', parserErr.message);
-            clearTimeout(readyTimeout);
-            rejectReady(parserErr);
-          });
-        });
-  
-        try {
-          await readyPromise;
-          console.log('Serial port opened and Arduino is ready.');
-          connected = true;
-          resolve(true);
-        } catch (error) {
-          console.error(`Failed to establish full connection after port open: ${error.message}`);
-          connected = false;
-          if (port && port.isOpen) {
-            port.close((closeErr) => {
-              if (closeErr) console.error('Error closing port after setup failure:', closeErr.message);
-            });
-          }
-          resolve(false);
-        }
-      });
-    });
-  } catch (error) {
-    console.error('Failed to setup serial connection:', error.message);
-    console.error('Error stack:', error.stack);
-    return false;
-  }
-}
+    const response = await fetch(url.toString(), { method: 'GET', timeout: 5000 }); // 5 second timeout
 
-// Returns null on success, or a specific error string on failure.
-async function sendCommand(command) {
-  console.log(`>>> sendCommand called with: "${command}"`);
-  console.log(`>>> Current state: port exists=${!!port}, port.isOpen=${port ? port.isOpen : 'N/A'}, connected flag=${connected}`);
-
-  if (!port) {
-    const errorMsg = 'Serial port object does not exist.';
-    console.error(`*** FAILURE POINT 1: ${errorMsg} ***`);
-    return errorMsg;
-  }
-  if (!port.isOpen) {
-    const errorMsg = `Serial port ${SERIAL_PORT} is not open.`;
-    console.error(`*** FAILURE POINT 2: ${errorMsg} ***`);
-    return errorMsg;
-  }
-  if (!connected) {
-    const errorMsg = 'Connection flag is false (setup failed or port closed).';
-     console.error(`*** FAILURE POINT 3: ${errorMsg} ***`);
-     return errorMsg;
-  }
- 
-  // Wrap port.write in a Promise
-  return new Promise((resolve) => {
-    try {
-      console.log(`Sending command to Arduino: ${command}`);
-      console.log(`>>> State just before write: port.isOpen=${port.isOpen}, connected=${connected}`); // Added more logging
-      port.write(command + '\n', (err) => {
-        if (err) {
-          const errorMsg = `Error writing command "${command}" to serial port: ${err.message}`;
-          console.error(`*** FAILURE POINT 4: ${errorMsg} ***`);
-          resolve(errorMsg); // Resolve promise with error message on write error
-        } else {
-          console.log(`>>> Command "${command}" write initiated successfully.`);
-          resolve(null); // Resolve promise with null on successful write initiation
-        }
-      });
-    } catch (error) {
-      const errorMsg = `Synchronous error during port.write setup: ${error.message}`;
-      console.error(`*** FAILURE POINT 5: ${errorMsg} ***`);
-      console.error('Error stack:', error.stack);
-      resolve(errorMsg); // Resolve promise with error message on synchronous error
+    if (!response.ok) {
+      const errorText = await response.text();
+      const errorMsg = `HTTP request failed: ${response.status} ${response.statusText} - ${errorText}`;
+      console.error(`*** HTTP Error: ${errorMsg} ***`);
+      return errorMsg;
     }
-  });
+
+    const responseText = await response.text(); // Read the response body
+    console.log(`ESP32 Response: ${responseText}`); // Log the response
+    return null; // Indicate success
+
+  } catch (error) {
+    const errorMsg = `Error sending HTTP request: ${error.message}`;
+    console.error(`*** Network/Fetch Error: ${errorMsg} ***`);
+    console.error('Error stack:', error.stack);
+    return errorMsg; // Indicate failure
+  }
 }
 
 // --- Leftover comment removed ---
@@ -186,9 +60,7 @@ server.tool(
     vertical: z.number().int().min(0).max(180).describe('Vertical position (0-180)'),
   },
   async ({ horizontal, vertical }) => {
-    const command = `MOVE ${horizontal} ${vertical}`;
-    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
-    
+    const errorResult = await sendHttpRequest('/move', { h: horizontal, v: vertical });
     return {
       content: [
         {
@@ -210,9 +82,7 @@ server.tool(
     openness: z.number().min(0).max(100).describe('Eyelid openness percentage (0-100)'),
   },
   async ({ openness }) => {
-    const command = `EYELIDS ${openness}`;
-    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
-    
+    const errorResult = await sendHttpRequest('/eyelids', { openness });
     return {
       content: [
         {
@@ -232,9 +102,7 @@ server.tool(
   'blink',
   {},
   async () => {
-    const command = 'BLINK';
-    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
-    
+    const errorResult = await sendHttpRequest('/blink');
     return {
       content: [
         {
@@ -268,9 +136,8 @@ server.tool(
     };
     
     const { h, v } = positions[target];
-    const command = `MOVE ${h} ${v}`;
-    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
-    
+    // The Arduino /move endpoint handles the actual movement
+    const errorResult = await sendHttpRequest('/move', { h, v });
     return {
       content: [
         {
@@ -292,9 +159,7 @@ server.tool(
     enable: z.boolean().describe('Enable or disable random eye movements'),
   },
   async ({ enable }) => {
-    const command = `RANDOM ${enable ? '1' : '0'}`;
-    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
-    
+    const errorResult = await sendHttpRequest('/random', { enable: enable ? '1' : '0' });
     return {
       content: [
         {
@@ -316,9 +181,7 @@ server.tool(
     enable: z.boolean().describe('Enable or disable automatic blinking'),
   },
   async ({ enable }) => {
-    const command = `AUTOBLINK ${enable ? '1' : '0'}`;
-    const errorResult = await sendCommand(command); // Returns null on success, error string on failure
-
+    const errorResult = await sendHttpRequest('/autoblink', { enable: enable ? '1' : '0' });
     return {
       content: [
         {
@@ -337,26 +200,7 @@ server.tool(
 async function main() {
   console.log('Starting Animatronic Eyes MCP Server...');
   
-  // List available ports for debugging
-  try {
-    const { SerialPort } = await import('serialport');
-    const ports = await SerialPort.list();
-    console.log('Available serial ports:');
-    ports.forEach(port => {
-      console.log(`- ${port.path} (${port.manufacturer || 'unknown manufacturer'})`);
-    });
-  } catch (err) {
-    console.error('Error listing serial ports:', err.message);
-  }
-  
-  // Setup serial connection
-  const serialConnected = await setupSerialConnection();
-  if (!serialConnected) {
-    console.warn('Warning: Continuing without Arduino connection. Commands will not be sent to hardware.');
-  }
-  
-  // Removed HTTP server setup
-  
+  // No serial connection setup needed anymore
   // Create both transports
   const stdioTransport = new StdioServerTransport();
   // Removed HTTP transport creation
@@ -366,9 +210,8 @@ async function main() {
   // Removed: await server.connect(httpTransport);
   
   // Removed HTTP server start
-  console.log(`MCP Server connected via Stdio and ready.`);
+  console.log(`MCP Server ready. Configured to send commands to ${ESP32_BASE_URL}`);
 
-  // --- Startup Test Call Removed ---
 }
 
 // Start the server
